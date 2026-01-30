@@ -4,8 +4,7 @@ import os
 import uuid
 import json
 from app.services.document_processor import DocumentProcessor
-from app.services.classifier import DocumentClassifier
-from app.services.extractor import DataExtractor
+from app.services.llm_extractor import LLMExtractor
 from app.services.search_engine import SearchEngine
 from app.utils.helpers import ensure_dir
 
@@ -17,10 +16,9 @@ OUTPUTS_DIR = "outputs"
 ensure_dir(UPLOADS_DIR)
 ensure_dir(OUTPUTS_DIR)
 
-# Initialize services (in a real app, use dependency injection)
+# Initialize services
 processor = DocumentProcessor()
-classifier = DocumentClassifier()
-extractor = DataExtractor()
+llm_extractor = LLMExtractor(model_name=os.getenv("OLLAMA_MODEL", "ministral-3:latest"))
 search_engine = SearchEngine()
 
 # In-memory storage for results and status (use DB for production)
@@ -55,7 +53,10 @@ async def run_processing_job(job_id: str):
     results = {}
     docs_for_search = []
     
+    print(f"DEBUG: Starting processing job {job_id} for {total_files} files")
+    
     for i, filename in enumerate(files):
+        print(f"DEBUG: Processing file {i+1}/{total_files}: {filename}")
         file_path = os.path.join(UPLOADS_DIR, filename)
         processing_status[job_id].update({"progress": int((i / total_files) * 100), "current_file": filename})
         
@@ -66,10 +67,17 @@ async def run_processing_job(job_id: str):
                 continue
                 
             clean_text = processor.clean_text(text)
-            doc_class = classifier.classify(clean_text)
-            extracted_data = extractor.extract(clean_text, doc_class)
             
-            result = {"class": doc_class, **extracted_data}
+            # Use LLM for both classification and extraction
+            # Strategy: Extractor now handles classification internally or we just pass a generic class
+            doc_class = "Unknown" # Or let LLM determine it
+            extracted_data = llm_extractor.extract(clean_text, doc_class)
+            
+            # If the LLM returned a document class in its JSON, use it
+            final_class = extracted_data.get("document_type", "Processed")
+            print(f"DEBUG: Successfully extracted data for {filename}. Class: {final_class}")
+            
+            result = {"class": final_class, **extracted_data}
             results[filename] = result
             
             docs_for_search.append({

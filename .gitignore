@@ -3,3 +3,4 @@
 .env
 /venv
 /models
+*pyc/

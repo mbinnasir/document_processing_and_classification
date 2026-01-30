@@ -2,11 +2,11 @@ fastapi
 uvicorn
 python-multipart
 pydantic
-sentence-transformers
+sentence-# AI/ML
 transformers
+sentence-transformers
 torch
-pdfplumber
-PyPDF2
+ollama
 pandas
 numpy
 python-dateutil 
