@@ -35,9 +35,16 @@ class LLMExtractor:
             print(f"DEBUG: Raw LLM response: {response['response']}")
             
             # Parse the JSON response
-            extracted_data = json.loads(response['response'])
+            raw_data = json.loads(response['response'])
             print("DEBUG: Successfully parsed LLM response JSON")
-            return extracted_data
+            
+            # Flatten the response for easier consumption
+            if "extracted_data" in raw_data and isinstance(raw_data["extracted_data"], dict):
+                extracted_data = raw_data["extracted_data"]
+                extracted_data["document_type"] = raw_data.get("document_type", "Other")
+                return extracted_data
+            
+            return raw_data
             
         except Exception as e:
             print(f"DEBUG ERROR: Error during LLM extraction: {e}")
@@ -48,23 +55,52 @@ class LLMExtractor:
         Construct a prompt for the LLM to both classify and extract data.
         """
         prompt = f"""
-        Analyze the text below. 
-        1. Identify what type of document it is (e.g., Invoice, Resume, Utility Bill, or Other).
-        2. Extract relevant structured information based on that type.
+        Analyze the text below and extract structured data.
         
-        Expected fields for common types:
-        - Invoice: invoice_number, date, total_amount, currency, vendor_name
-        - Resume: name, email, phone, experience_years, latest_job_title
-        - Utility Bill: account_number, date, amount_due, usage_kwh
+        STRICT CLASSIFICATION RULES:
+        Classify the document into exactly ONE of these types:
+        - "Invoice"
+        - "Resume"
+        - "Utility Bill"
+        - "Other" (if it doesn't clearly fit the above)
+
+        REQUIRED EXTRACTION SCHEMAS:
         
-        Return the result strictly as a JSON object with a "document_type" field and all extracted data.
+        1. IF "Invoice":
+           - invoice_number (string)
+           - date (string, YYYY-MM-DD format if possible)
+           - company (string, vendor name)
+           - total_amount (string or number)
+           
+        2. IF "Resume":
+           - name (string)
+           - email (string)
+           - phone (string)
+           - experience_years (number, estimate if needed)
+           
+        3. IF "Utility Bill":
+           - account_number (string)
+           - date (string)
+           - usage_kwh (string or number)
+           - amount_due (string or number)
+           
+        4. IF "Other":
+           - summary (string, brief summary of content)
+
+        OUTPUT FORMAT:
+        Return ONLY a raw JSON object. Do not include markdown formatting (```json).
+        The JSON must have this exact structure:
+        {{
+            "document_type": "The Class Name",
+            "extracted_data": {{ ... fields based on schema ... }}
+        }}
         
         Text to process:
         ---
         {text[:2500]}
         ---
         
-        Return ONLY the JSON object.
+        Return ONLY the valid JSON object.
         """
         return prompt
 

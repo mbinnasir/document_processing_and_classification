@@ -5,3 +5,4 @@
 /models
 *pyc/
 project.zip
+*.db

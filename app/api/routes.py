@@ -12,6 +12,8 @@ from app.database import get_db, Document
 from app.models.schemas import ChatQuery, ChatResponse, DocumentResponse, ProcessingStatus
 from sqlalchemy.orm import Session
 from fastapi import Depends
+import asyncio
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -34,6 +36,8 @@ processing_status = {}
 @router.post("/documents/upload")
 async def upload_documents(files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
     uploaded_files = []
+    processing_tasks = []
+    
     for file in files:
         file_path = os.path.join(UPLOADS_DIR, file.filename)
         content_bytes = await file.read()
@@ -43,6 +47,8 @@ async def upload_documents(files: List[UploadFile] = File(...), db: Session = De
             f.write(content_bytes)
         
         # Extract text and vectorize immediately
+        # OPTIMIZATION: These steps are CPU bound/Blocking, could be moved to thread as well
+        # but kept here for now to populate initial DB record quickly
         text = processor.extract_text(file_path)
         clean_text = processor.clean_text(text) if text else ""
         
@@ -60,21 +66,40 @@ async def upload_documents(files: List[UploadFile] = File(...), db: Session = De
         db.commit()
         db.refresh(db_doc)
         
-        uploaded_files.append(DocumentResponse.model_validate(db_doc))
+        # Keep track of the SA instances
+        uploaded_files.append(db_doc)
         print(f"DEBUG: Vectorized and stored document {file.filename} in DB with ID {db_doc.id}")
-    
-    return {"message": f"{len(uploaded_files)} files uploaded successfully", "files": uploaded_files}
 
-@router.post("/documents/process/{doc_id}")
-async def process_document(doc_id: str, background_tasks: BackgroundTasks):
-    job_id = str(uuid.uuid4())
-    processing_status[job_id] = {"status": "processing", "progress": 0, "current_file": doc_id}
-    
-    background_tasks.add_task(run_processing_job_v2, job_id, doc_id)
-    
-    return {"status": "processing", "job_id": job_id}
+        job_id = str(uuid.uuid4())
+        # Add to tasks list to run in parallel
+        # We use run_in_threadpool to offload the blocking LLM/DB work to a thread
+        processing_tasks.append(run_in_threadpool(run_processing_job_v2, job_id, db_doc.id))
 
-async def run_processing_job_v2(job_id: str, doc_id: str):
+    # Run all processing jobs in parallel (threaded)
+    if processing_tasks:
+        await asyncio.gather(*processing_tasks)
+    
+    # Refresh all docs to get the processed output
+    # Since we are using a different session in the thread, we need to refresh or re-query
+    # But for the response, we might just return the IDs and let the user poll or trust the refresh
+    # Re-querying is safer to ensure we get the latest state committed by the threads
+    final_response_files = []
+    for f in uploaded_files:
+        db.refresh(f) # Refreshes from DB
+        final_response_files.append(DocumentResponse.model_validate(f))
+
+    return {"message": f"{len(uploaded_files)} files uploaded and processed successfully", "files": final_response_files}
+
+# @router.post("/documents/process/{doc_id}")
+# async def process_document(doc_id: str, background_tasks: BackgroundTasks):
+#     job_id = str(uuid.uuid4())
+#     processing_status[job_id] = {"status": "processing", "progress": 0, "current_file": doc_id}
+    
+#     background_tasks.add_task(run_processing_job_v2, job_id, doc_id)
+    
+#     return {"status": "processing", "job_id": job_id}
+
+def run_processing_job_v2(job_id: str, doc_id: str):
     db = next(get_db())
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
