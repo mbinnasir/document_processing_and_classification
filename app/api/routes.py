@@ -6,7 +6,12 @@ import json
 from app.services.document_processor import DocumentProcessor
 from app.services.llm_extractor import LLMExtractor
 from app.services.search_engine import SearchEngine
+from app.services.chatbot_service import ChatbotService
 from app.utils.helpers import ensure_dir
+from app.database import get_db, Document
+from app.models.schemas import ChatQuery, ChatResponse, DocumentResponse, ProcessingStatus
+from sqlalchemy.orm import Session
+from fastapi import Depends
 
 router = APIRouter()
 
@@ -20,31 +25,89 @@ ensure_dir(OUTPUTS_DIR)
 processor = DocumentProcessor()
 llm_extractor = LLMExtractor(model_name=os.getenv("OLLAMA_MODEL", "ministral-3:latest"))
 search_engine = SearchEngine()
+chatbot = ChatbotService(model_name=os.getenv("OLLAMA_MODEL", "ministral-3:latest"))
 
 # In-memory storage for results and status (use DB for production)
 processing_results = {}
 processing_status = {}
 
 @router.post("/documents/upload")
-async def upload_documents(files: List[UploadFile] = File(...)):
+async def upload_documents(files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
     uploaded_files = []
     for file in files:
         file_path = os.path.join(UPLOADS_DIR, file.filename)
+        content_bytes = await file.read()
+        
+        # Save file to disk
         with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        uploaded_files.append(file.filename)
+            f.write(content_bytes)
+        
+        # Extract text and vectorize immediately
+        text = processor.extract_text(file_path)
+        clean_text = processor.clean_text(text) if text else ""
+        
+        embedding = None
+        if clean_text:
+            embedding = search_engine.model.encode(clean_text).tolist()
+        
+        # Save to DB
+        db_doc = Document(
+            document_name=file.filename,
+            content=clean_text,
+            vector_embeddings=embedding
+        )
+        db.add(db_doc)
+        db.commit()
+        db.refresh(db_doc)
+        
+        uploaded_files.append(DocumentResponse.model_validate(db_doc))
+        print(f"DEBUG: Vectorized and stored document {file.filename} in DB with ID {db_doc.id}")
     
     return {"message": f"{len(uploaded_files)} files uploaded successfully", "files": uploaded_files}
 
-@router.post("/documents/process")
-async def process_documents(background_tasks: BackgroundTasks):
+@router.post("/documents/process/{doc_id}")
+async def process_document(doc_id: str, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    processing_status[job_id] = {"status": "processing", "progress": 0, "current_file": ""}
+    processing_status[job_id] = {"status": "processing", "progress": 0, "current_file": doc_id}
     
-    background_tasks.add_task(run_processing_job, job_id)
+    background_tasks.add_task(run_processing_job_v2, job_id, doc_id)
     
     return {"status": "processing", "job_id": job_id}
+
+async def run_processing_job_v2(job_id: str, doc_id: str):
+    db = next(get_db())
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc:
+            print(f"DEBUG ERROR: Document {doc_id} not found in DB")
+            processing_status[job_id] = {"status": "error", "error": "Document not found"}
+            return
+
+        print(f"DEBUG: Starting processing for document {doc.document_name} ({doc_id})")
+        
+        if not doc.content:
+            print(f"DEBUG ERROR: No content found for document {doc.document_name}")
+            doc.processed_output = {"class": "Unclassifiable", "error": "No content"}
+            db.commit()
+            processing_status[job_id] = {"status": "complete"}
+            return
+
+        # Process with LLM
+        extracted_data = llm_extractor.extract(doc.content, "Unknown")
+        final_class = extracted_data.get("document_type", "Processed")
+        
+        result = {"class": final_class, **extracted_data}
+        doc.processed_output = result
+        db.commit()
+        
+        print(f"DEBUG: Successfully processed and stored result for {doc.document_name}")
+        processing_status[job_id] = {"status": "complete", "progress": 100}
+        
+    except Exception as e:
+        print(f"DEBUG ERROR: Error processing document {doc_id}: {e}")
+        processing_status[job_id] = {"status": "error", "error": str(e)}
+    finally:
+        db.close()
 
 async def run_processing_job(job_id: str):
     files = [f for f in os.listdir(UPLOADS_DIR) if os.path.isfile(os.path.join(UPLOADS_DIR, f))]
@@ -104,15 +167,6 @@ async def run_processing_job(job_id: str):
     
     processing_status[job_id] = {"status": "complete", "progress": 100, "current_file": ""}
 
-@router.get("/documents/results")
-async def get_results():
-    if not processing_results:
-        output_path = os.path.join(OUTPUTS_DIR, "results.json")
-        if os.path.exists(output_path):
-            with open(output_path, "r") as f:
-                return json.load(f)
-    return processing_results
-
 @router.get("/documents/status/{job_id}")
 async def get_status(job_id: str):
     if job_id not in processing_status:
@@ -120,21 +174,17 @@ async def get_status(job_id: str):
         return {"status": "unknown"}
     return processing_status[job_id]
 
-@router.post("/search")
-async def search(query_data: Dict[str, str]):
-    query = query_data.get("query")
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
-    
-    results = search_engine.search(query)
-    return {"results": results, "count": len(results)}
+@router.post("/chat", response_model=ChatResponse)
+async def chat(query_data: ChatQuery, db: Session = Depends(get_db)):
+    response = chatbot.chat(query_data.query, db)
+    return ChatResponse(response=response)
 
 @router.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "models_loaded": {
-            "classifier": classifier.classifier is not None,
-            "search": search_engine.model is not None
+            "search": search_engine.model is not None,
+            "chatbot": chatbot.model_name is not None
         }
     }

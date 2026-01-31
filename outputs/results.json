@@ -1,9 +1,0 @@
-{
-  "invoice_1.pdf": {
-    "class": "Invoice",
-    "invoice_number": "1001",
-    "date": "2016-06-25",
-    "company": "Invoice #1001",
-    "total_amount": 73.0
-  }
-}

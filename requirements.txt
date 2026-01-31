@@ -2,7 +2,6 @@ fastapi
 uvicorn
 python-multipart
 pydantic
-sentence-# AI/ML
 transformers
 sentence-transformers
 torch
@@ -12,3 +11,6 @@ numpy
 python-dateutil 
 aiofiles
 python-dotenv
+sqlalchemy
+sqlite-vec
+pdfplumber

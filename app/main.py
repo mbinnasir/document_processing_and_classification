@@ -3,6 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 from app.api.routes import router as api_router
+from app.database import init_db
+
+# Initialize database
+try:
+    init_db()
+    print("DEBUG: Database initialized successfully")
+except Exception as e:
+    print(f"DEBUG ERROR: Database initialization failed: {e}")
 
 app = FastAPI(title="AI Document Processing System")
 
