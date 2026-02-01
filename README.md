@@ -9,7 +9,7 @@ This is a local AI-powered document processing system that can classify document
 - **Sentence Transformers**: For generating text embeddings.
 
 ## Prerequisites
-- **Python 3.10+**
+- **Python 3.14+**
 - **Ollama**: [Download and install Ollama](https://ollama.com/)
 
 ## Installation

@@ -4,5 +4,5 @@
 /venv
 /models
 *pyc/
-project.zip
 *.db
+*.zip
