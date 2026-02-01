@@ -17,19 +17,16 @@ from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 
-# Directories
 UPLOADS_DIR = "uploads"
 OUTPUTS_DIR = "outputs"
 ensure_dir(UPLOADS_DIR)
 ensure_dir(OUTPUTS_DIR)
 
-# Initialize services
 processor = DocumentProcessor()
-llm_extractor = LLMExtractor(model_name=os.getenv("OLLAMA_MODEL", "ministral-3:latest"))
+llm_extractor = LLMExtractor(model_name=os.getenv("OLLAMA_MODEL"))
 search_engine = SearchEngine()
-chatbot = ChatbotService(model_name=os.getenv("OLLAMA_MODEL", "ministral-3:latest"))
+chatbot = ChatbotService(model_name=os.getenv("OLLAMA_MODEL"))
 
-# In-memory storage for results and status (use DB for production)
 processing_results = {}
 processing_status = {}
 
@@ -41,22 +38,17 @@ async def upload_documents(files: List[UploadFile] = File(...), db: Session = De
     for file in files:
         file_path = os.path.join(UPLOADS_DIR, file.filename)
         content_bytes = await file.read()
-        
-        # Save file to disk
+
         with open(file_path, "wb") as f:
             f.write(content_bytes)
-        
-        # Extract text and vectorize immediately
-        # OPTIMIZATION: These steps are CPU bound/Blocking, could be moved to thread as well
-        # but kept here for now to populate initial DB record quickly
+
         text = processor.extract_text(file_path)
         clean_text = processor.clean_text(text) if text else ""
         
         embedding = None
         if clean_text:
             embedding = search_engine.model.encode(clean_text).tolist()
-        
-        # Save to DB
+
         db_doc = Document(
             document_name=file.filename,
             content=clean_text,
@@ -65,72 +57,46 @@ async def upload_documents(files: List[UploadFile] = File(...), db: Session = De
         db.add(db_doc)
         db.commit()
         db.refresh(db_doc)
-        
-        # Keep track of the SA instances
         uploaded_files.append(db_doc)
-        print(f"DEBUG: Vectorized and stored document {file.filename} in DB with ID {db_doc.id}")
 
         job_id = str(uuid.uuid4())
-        # Add to tasks list to run in parallel
-        # We use run_in_threadpool to offload the blocking LLM/DB work to a thread
         processing_tasks.append(run_in_threadpool(run_processing_job_v2, job_id, db_doc.id))
 
-    # Run all processing jobs in parallel (threaded)
     if processing_tasks:
         await asyncio.gather(*processing_tasks)
     
-    # Refresh all docs to get the processed output
-    # Since we are using a different session in the thread, we need to refresh or re-query
-    # But for the response, we might just return the IDs and let the user poll or trust the refresh
-    # Re-querying is safer to ensure we get the latest state committed by the threads
     final_response_files = []
     for f in uploaded_files:
-        db.refresh(f) # Refreshes from DB
+        db.refresh(f)
         final_response_files.append(DocumentResponse.model_validate(f))
 
     return {"message": f"{len(uploaded_files)} files uploaded and processed successfully", "files": final_response_files}
-
-# @router.post("/documents/process/{doc_id}")
-# async def process_document(doc_id: str, background_tasks: BackgroundTasks):
-#     job_id = str(uuid.uuid4())
-#     processing_status[job_id] = {"status": "processing", "progress": 0, "current_file": doc_id}
-    
-#     background_tasks.add_task(run_processing_job_v2, job_id, doc_id)
-    
-#     return {"status": "processing", "job_id": job_id}
 
 def run_processing_job_v2(job_id: str, doc_id: str):
     db = next(get_db())
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc:
-            print(f"DEBUG ERROR: Document {doc_id} not found in DB")
-            processing_status[job_id] = {"status": "error", "error": "Document not found"}
-            return
-
-        print(f"DEBUG: Starting processing for document {doc.document_name} ({doc_id})")
+            raise HTTPException(status_code=404, detail="Document not found")
         
         if not doc.content:
-            print(f"DEBUG ERROR: No content found for document {doc.document_name}")
             doc.processed_output = {"class": "Unclassifiable", "error": "No content"}
             db.commit()
             processing_status[job_id] = {"status": "complete"}
-            return
+            raise HTTPException(status_code=400, detail="No content found for document")
 
-        # Process with LLM
         extracted_data = llm_extractor.extract(doc.content, "Unknown")
         final_class = extracted_data.get("document_type", "Processed")
         
         result = {"class": final_class, **extracted_data}
         doc.processed_output = result
         db.commit()
-        
-        print(f"DEBUG: Successfully processed and stored result for {doc.document_name}")
+
         processing_status[job_id] = {"status": "complete", "progress": 100}
         
     except Exception as e:
-        print(f"DEBUG ERROR: Error processing document {doc_id}: {e}")
         processing_status[job_id] = {"status": "error", "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
@@ -141,10 +107,7 @@ async def run_processing_job(job_id: str):
     results = {}
     docs_for_search = []
     
-    print(f"DEBUG: Starting processing job {job_id} for {total_files} files")
-    
     for i, filename in enumerate(files):
-        print(f"DEBUG: Processing file {i+1}/{total_files}: {filename}")
         file_path = os.path.join(UPLOADS_DIR, filename)
         processing_status[job_id].update({"progress": int((i / total_files) * 100), "current_file": filename})
         
@@ -155,15 +118,11 @@ async def run_processing_job(job_id: str):
                 continue
                 
             clean_text = processor.clean_text(text)
-            
-            # Use LLM for both classification and extraction
-            # Strategy: Extractor now handles classification internally or we just pass a generic class
-            doc_class = "Unknown" # Or let LLM determine it
+
+            doc_class = "Unknown"
             extracted_data = llm_extractor.extract(clean_text, doc_class)
             
-            # If the LLM returned a document class in its JSON, use it
             final_class = extracted_data.get("document_type", "Processed")
-            print(f"DEBUG: Successfully extracted data for {filename}. Class: {final_class}")
             
             result = {"class": final_class, **extracted_data}
             results[filename] = result
@@ -175,18 +134,15 @@ async def run_processing_job(job_id: str):
             })
             
         except Exception as e:
-            print(f"Error processing {filename}: {e}")
             results[filename] = {"class": "Error", "error": str(e)}
+            raise HTTPException(status_code=500, detail=str(e))
 
-    # Index for search
     search_engine.index_documents(docs_for_search)
-    
-    # Save to outputs
+
     output_path = os.path.join(OUTPUTS_DIR, "results.json")
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
-    
-    # Update global results
+
     global processing_results
     processing_results = results
     
@@ -195,7 +151,6 @@ async def run_processing_job(job_id: str):
 @router.get("/documents/status/{job_id}")
 async def get_status(job_id: str):
     if job_id not in processing_status:
-        # Fallback to check if results exist if status is lost
         return {"status": "unknown"}
     return processing_status[job_id]
 

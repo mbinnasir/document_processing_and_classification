@@ -20,7 +20,7 @@ class ChatQuery(BaseModel):
     query: str
 
 class ChatResponse(BaseModel):
-    response: str
+    response: Any
 
 class ProcessingStatus(BaseModel):
     job_id: str

@@ -5,25 +5,20 @@ import os
 from app.api.routes import router as api_router
 from app.database import init_db
 
-# Initialize database
 try:
     init_db()
-    print("DEBUG: Database initialized successfully")
 except Exception as e:
-    print(f"DEBUG ERROR: Database initialization failed: {e}")
+    raise HTTPException(status_code=500, detail=str(e))
 
 app = FastAPI(title="AI Document Processing System")
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify the actual frontend URL
-    allow_credentials=True,
+    allow_origins=["*"], 
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include API routes
 app.include_router(api_router, prefix="/api")
 
 @app.get("/")

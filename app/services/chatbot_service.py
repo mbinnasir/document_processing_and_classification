@@ -7,72 +7,115 @@ from app.database import Document
 from app.services.search_engine import SearchEngine
 from sentence_transformers import util
 import torch
+from dotenv import load_dotenv
+import os
+from fastapi import HTTPException
+
+load_dotenv()
+
+print("Model_name", os.getenv("OLLAMA_MODEL"))
 
 
 class ChatbotService:
-    def __init__(self, model_name: str = "ministral-3:latest"):
-        self.model_name = model_name
+    def __init__(self, model_name: str = None):
+        self.model_name = model_name or os.getenv("OLLAMA_MODEL") or "qwen3-vl:latest"
         self.search_engine = SearchEngine()
 
     def chat(self, query: str, db: Session) -> str:
-        query_embedding = self.search_engine.model.encode(query).tolist()
-        docs_with_embeddings = db.query(Document).filter(Document.vector_embeddings.isnot(None)).all()
-        
-        # Filter out documents that might have None embeddings despite the query filter
-        # This handles cases where JSON null might be returned or other anomalies
-        valid_docs = [doc for doc in docs_with_embeddings if doc.vector_embeddings is not None and isinstance(doc.vector_embeddings, list)]
-        
-        relevant_docs = []
-        if valid_docs:
-            embeddings = [doc.vector_embeddings for doc in valid_docs]
-            # Ensure query_embedding is also a tensor
-            query_tensor = torch.tensor(query_embedding)
-            embeddings_tensor = torch.tensor(embeddings)
-            
-            cos_scores = util.cos_sim(query_tensor, embeddings_tensor)[0]
-            top_results = torch.topk(cos_scores, k=min(3, len(valid_docs)))
-            
-            for score, idx in zip(top_results[0], top_results[1]):
-                relevant_docs.append(valid_docs[idx.item()])
+        # Fetch all documents to provide full context as requested
+        all_docs = db.query(Document).all()
 
         context = ""
-        for doc in relevant_docs:
+        for doc in all_docs:
             if doc.processed_output:
                 context += f"Document: {doc.document_name}\nData: {json.dumps(doc.processed_output)}\n\n"
-            else:
+            elif doc.content:
                 context += f"Document: {doc.document_name}\nContent: {doc.content[:500]}...\n\n"
 
-        print("Content:",context)
-        prompt = f"""
-        You are a helpful document assistant. Use the following context from processed documents to answer the user's question.
-        If the user asks for specific JSON data, provide it from the context.
-        If the answer is not in the context, say you don't know based on the current documents.
-        also only return the answer in the format of json which is given no extra context
+        print("Content:", context)
+        # prompt = f"""
+        # You are a highly capable Document AI Assistant. Your goal is to provide precise, structured answers based on the provided document context.
 
-        Context:
+        # ### GUIDELINES:
+        # 1. **RELEVANCE IS CRITICAL**: Only include documents and data points that are directly relevant to the user's query. If a document does not contain the specific information requested, EXCLUDE it from your response.
+        # 2. **STRICT JSON**: Your response must be valid JSON. No conversational text, no comments (//), no markdown titles. Just the JSON object or array.
+        # 3. **FIELD PRECISION**: Pay attention to field names. For example, if a user asks for "due dates", look for fields like 'due_date' or 'amount_due' in Utility Bills. Do not confuse generic 'date' fields in Invoices with 'due dates' unless they are explicitly labeled as such.
+        # 4. **FILTERING**: If the user's query implies a category (e.g., "bills"), do not include other categories (e.g., "invoices").
+        # 5. **NO EXTRA FIELDS**: Only return the fields requested or the most important identifiers (like document_name, date, total) if a summary is asked.
+
+        # ### CONTEXT:
+        # {context}
+
+        # ### USER QUESTION:
+        # {query}
+        # """
+        prompt = f"""
+        You are a strict Document Extraction Engine.
+
+        Your task is to FILTER documents and RETURN structured data that EXACTLY matches the user's request.
+
+        ### ABSOLUTE RULES (DO NOT VIOLATE):
+        1. OUTPUT MUST BE VALID JSON ONLY.
+        - No explanations
+        - No markdown
+        - No comments
+        2. INCLUDE A DOCUMENT ONLY IF IT FULLY MATCHES ALL FILTER CONDITIONS.
+        3. IF A DOCUMENT DOES NOT CONTAIN THE EXACT FIELD REQUESTED, EXCLUDE IT.
+        4. WHEN A TERM HAS A DOMAIN-SPECIFIC MEANING, USE THE CORRECT DOCUMENT TYPE:
+        - "due amount" → Utility Bill → field: amount_due
+        - Invoices use total_amount and MUST NOT be treated as due amounts.
+        5. DATE FILTERS ARE STRICT:
+        - "June" means month == 06 only.
+        - Any other month MUST be excluded.
+        6. DO NOT INFER OR SUBSTITUTE FIELDS.
+        7. DO NOT MIX DOCUMENT TYPES UNLESS EXPLICITLY REQUESTED.
+
+        ### FIELD MAPPING REFERENCE:
+        - Utility Bill:
+        - date
+        - amount_due
+        - account_number
+        - Invoice:
+        - date
+        - total_amount (NOT a due amount)
+
+        ### CONTEXT DOCUMENTS:
         {context}
 
-        User Question: {query}
-        """
+        ### USER QUERY:
+        {query}
 
+        ### REQUIRED OUTPUT FORMAT:
+        {{
+        "response": [ <filtered objects only> ]
+        }}
+        """
+        # print("Model_name":self.model_name)
         try:
-            # print(f"DEBUG: Chatting with LLM using context from {len(relevant_docs)} docs")
             response = ollama.generate(
                 model=self.model_name,
                 prompt=prompt,
                 options={
-                    "temperature": 0.5,
-                }
+                    "temperature": 0.1,  # Lower temperature for better JSON consistency
+                },
             )
-            print(f"DEBUG: LLM response: {response['response']}")
-            content = response['response'].strip()
+            content = response["response"].strip()
+
+            # Remove markdown code blocks if present
             if content.startswith("```"):
-                content = content.strip("`").replace("json\n", "", 1).strip()
-            
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip("`").strip()
+
+            # Attempt to strip C-style comments if the LLM included them
+            import re
+
+            content = re.sub(r"//.*", "", content)
+
             try:
-                return content
+                return json.loads(content)
             except json.JSONDecodeError:
-                pass
+                return content
         except Exception as e:
-            print(f"DEBUG ERROR: Chatbot error: {e}")
-            return f"I encountered an error while processing your request: {e}"
+            raise HTTPException(status_code=500, detail=str(e))

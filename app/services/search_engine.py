@@ -8,31 +8,26 @@ class SearchEngine:
         try:
             self.model = SentenceTransformer(model_name)
         except Exception as e:
-            print(f"Error loading search model: {e}")
             self.model = None
-        self.documents = []  # List of {id, text, metadata}
+            raise HTTPException(status_code=500, detail=str(e))
+        self.documents = []
         self.embeddings = None
 
     def index_documents(self, docs: List[Dict[str, Any]]):
-        """Index a list of documents with their text and metadata."""
         if not self.model or not docs:
             return
 
         self.documents = docs
         texts = [doc['text'] for doc in docs]
-        
-        # In a real app, you'd chunk large docs, but here we'll keep it simple
         self.embeddings = self.model.encode(texts, convert_to_tensor=True)
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search for relevant documents based on a natural language query."""
         if not self.model or self.embeddings is None:
             return []
 
         query_embedding = self.model.encode(query, convert_to_tensor=True)
         cos_scores = util.cos_sim(query_embedding, self.embeddings)[0]
-        
-        # Get top k results
+
         top_results = torch.topk(cos_scores, k=min(top_k, len(self.documents)))
         
         results = []

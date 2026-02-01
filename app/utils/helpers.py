@@ -16,7 +16,7 @@ def clear_directory(path: str):
                 elif os.path.is_dir(file_path):
                     shutil.rmtree(file_path)
             except Exception as e:
-                print(f'Failed to delete {file_path}. Reason: {e}')
+                raise HTTPException(status_code=500, detail=str(e))
 
 def get_all_files(directory: str, extensions: List[str] = [".pdf", ".txt"]) -> List[str]:
     files = []
